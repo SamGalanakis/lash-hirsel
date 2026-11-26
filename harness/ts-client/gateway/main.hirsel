@@ -45,11 +45,11 @@ fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, clock: Clock, ran
     let Ok(take lease) = harness.gateway.route(d, 0u64) else {
         return Error("could not route revocation")
     }
-    let Some(address) = latest.read(platform.local.status(lease)).addr else {
-        return Error("no place address")
+    let Some(dialer) = platform.local.dialer(lease) else {
+        return Error("place not dialable")
     }
     let keys = result.unwrap(runner.fixture.entry_keys(code.describe(scripted_entries)))
-    let Ok(take opened) = runner.fixture.client_at(tasks, net, clock, random, keys, notes.main.wire().socket, address, Some(clone(credential)), None, notes.main.HTTP_MS) else {
+    let Ok(take opened) = runner.fixture.client_dial(tasks, dialer, clock, random, keys, notes.main.wire().socket, Some(clone(credential)), None) else {
         return Error("could not connect for revocation")
     }
     let mut client = take opened

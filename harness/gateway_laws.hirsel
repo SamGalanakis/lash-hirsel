@@ -249,7 +249,7 @@ fn session_place(take supplied: platform.local.Supplied, s: Services) -> Result[
     let w = result.unwrap(wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()))
     let config_grants: runner.Grants[Grants, harness.Handles, Services] = runner.Grants(attempt: Some(runner.Mint(seed: services_of(s, string.from(supplied.name)), mint: make_grants, mint_bytes: EFFECT_GRANT, mint_steps: runner.DEFAULT_STEPS)), call: None, claim: None, bind: Some(runner.Mint(seed: services_of(s, string.from(supplied.name)), mint: bind_grants, mint_bytes: EFFECT_GRANT, mint_steps: runner.DEFAULT_STEPS)))
-    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS)))
+    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS)))
 }
 
 fn session_factory() -> platform.local.Factory[Services] {
@@ -271,13 +271,13 @@ fn call_routed[A: codec, R: codec](door: harness.gateway.Door, id: u64, credenti
         Error(Place(_)) => return Error(101u64),
         Error(_) => return Error(100u64)
     }
-    let Some(address) = latest.read(platform.local.status(lease)).addr else {
+    let Some(dialer) = platform.local.dialer(lease) else {
         return Error(102u64)
     }
     let Ok(keys) = runner.fixture.entry_keys(code.describe(place)) else {
         return Error(103u64)
     }
-    let Ok(take c) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(clone(credential)), resume, WITHIN_MS) else {
+    let Ok(take c) = runner.fixture.client_dial(tasks, dialer, clock, random, keys, wire().socket, Some(clone(credential)), resume) else {
         return Error(104u64)
     }
     let mut client = take c
@@ -527,13 +527,13 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
         Ok(take l) => take l,
         Error(_) => return 14u64
     }
-    let Some(address) = latest.read(platform.local.status(lease)).addr else {
+    let Some(dialer) = platform.local.dialer(lease) else {
         return 15u64
     }
     let Ok(keys) = runner.fixture.entry_keys(code.describe(place)) else {
         return 16u64
     }
-    let Ok(take lingering) = runner.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(runner.ingress.credential(random)), None, WITHIN_MS) else {
+    let Ok(take lingering) = runner.fixture.client_dial(tasks, dialer, clock, random, keys, wire().socket, Some(runner.ingress.credential(random)), None) else {
         return 17u64
     }
     let _ = take lease

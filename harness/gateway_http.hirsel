@@ -135,8 +135,8 @@ fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, resume:
         match harness.gateway.access(d, id, identity.caller, wake) {
             Ok(None) => return Ok(None),
             Ok(Some(take lease)) => {
-                if let Some(address) = latest.read(platform.local.status(lease)).addr {
-                    let opened = runner.client.client_at(f.net, f.clock, f.random, f.keys, f.socket, address, f.authority, Some(clone(identity.credential)), resume, f.within_ms)
+                if let Some(dialer) = platform.local.dialer(lease) {
+                    let opened = runner.client.client_dial(dialer, f.clock, f.random, f.keys, f.socket, Some(clone(identity.credential)), resume)
                     if let Ok(take c) = take opened {
                         let mut client = take c
                         let who = runner.client.bound_caller(client)

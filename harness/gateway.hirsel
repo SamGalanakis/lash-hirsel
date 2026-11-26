@@ -295,10 +295,10 @@ fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harne
     let Ok(lease) = route(d, id) else {
         return Error(Unavailable)
     }
-    let Some(address) = latest.read(platform.local.status(lease)).addr else {
+    let Some(dialer) = platform.local.dialer(lease) else {
         return Error(Unavailable)
     }
-    let Ok(take opened) = runner.client.client_at(c.net, c.clock, c.random, c.keys, c.socket, address, c.authority, Some(clone(credential)), None, c.within_ms) else {
+    let Ok(take opened) = runner.client.client_dial(dialer, c.clock, c.random, c.keys, c.socket, Some(clone(credential)), None) else {
         return Error(Unavailable)
     }
     let _ = take lease
