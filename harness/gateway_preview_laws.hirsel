@@ -133,17 +133,17 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let mut name = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut name))
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
-    let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let (asks, inbox): (Client[Client[()]], Inbox[Client[()]]) = result.unwrap(conn.new(4u64, bytes 0u64))
+    let (tallies, _held): (Client[Client[()]], Inbox[Client[()]]) = result.unwrap(conn.new(4u64, bytes 0u64))
     let way: harness.gateway.Doorway = harness.gateway.doorway(harness.declare_tables)
     let door = harness.gateway.door_of(way)
     let worker_port = if enabled {
-        Some(harness.preview.door(hub))
+        Some(harness.preview.producer(harness.preview.door(hub)))
     } else {
         None
     }
-    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: chunks)
-    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let seed = Services(model: take asks, tallies: take tallies, subagents: None, name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: chunks)
+    let config = harness.gateway.GatewayConfig(root: root, options: runner.triggers.law_options(), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, units: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return Error(10u64)
     }
@@ -169,7 +169,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     if posted != 202u16 {
         return Error(12u64)
     }
-    let Ok(first) = channel.receive(inbox) else {
+    let Ok(first) = conn.receive(inbox) else {
         return Error(14u64)
     }
     let mut tab = browser(net, clock, port, me)?
@@ -178,7 +178,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     if !read_until(mut tab, mut decoder, mut rows, "thinking") {
         return Error(13u64)
     }
-    let _ = channel.send(first, ())
+    let _ = conn.send(first, ())
     let mut shown_key: Option[harness.preview.Key] = None
     if enabled {
         let Some(p) = first_draft(mut tab, mut decoder) else {
@@ -215,10 +215,10 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if !ended_without_rows(mut other) {
             return Error(43u64)
         }
-        let Ok(rest) = channel.receive(inbox) else {
+        let Ok(rest) = conn.receive(inbox) else {
             return Error(45u64)
         }
-        let _ = channel.send(rest, ())
+        let _ = conn.send(rest, ())
         if !denied_history(net, clock, port, me) {
             return Error(47u64)
         }
@@ -239,10 +239,10 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     // Close the original connection while the worker still waits. Reopen only
     // after all work and the trigger's terminal journal commit are durable.
     let _ = take tab
-    let Ok(rest) = channel.receive(inbox) else {
+    let Ok(rest) = conn.receive(inbox) else {
         return Error(17u64)
     }
-    let _ = channel.send(rest, ())
+    let _ = conn.send(rest, ())
     let Some(_) = down_within(door, 0u64, clock) else {
         return Error(18u64)
     }
@@ -294,20 +294,20 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
                 return Error(25u64)
             }
             std.clock.sleep_ns(clock, 60000000u64)
-            let Ok(next_delta) = channel.receive(inbox) else {
+            let Ok(next_delta) = conn.receive(inbox) else {
                 return Error(26u64)
             }
-            let _ = channel.send(next_delta, ())
+            let _ = conn.send(next_delta, ())
             let Some(next_draft) = first_draft(mut returned, mut again_decoder) else {
                 return Error(27u64)
             }
             if next_draft.key.run != 1u64 || next_draft.key.entry != 4u64 {
                 return Error(28u64)
             }
-            let Ok(next_rest) = channel.receive(inbox) else {
+            let Ok(next_rest) = conn.receive(inbox) else {
                 return Error(29u64)
             }
-            let _ = channel.send(next_rest, ())
+            let _ = conn.send(next_rest, ())
             let folded = fold_drafts(mut returned, mut again_decoder, clone(next_draft), mut again, 5u64)
             if folded != 0u64 {
                 return Error(3000u64 + folded)

@@ -18,27 +18,35 @@ pub type Draft: codec + send {
     text: String,
 }
 
-type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(String, Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Option[runner.client.Signal], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Sweep | Stop
+type Input: send = Start(String, store.Caller, Key, u64, Inbox[()]) | Delta(String, Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Option[runner.client.Signal], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Barrier(Client[()]) | Sweep | Stop
+
+type Production: cross = Begin(String, store.Caller, Key, u64, Client[Client[()]]) | Update(String, Key, u64, u64, u64, String) | Flush(Client[()]) | Prune
+
+pub opaque type Producer: cross {
+    to: Client[Production],
+    text_bytes: u64
+}
 
 pub opaque type Door: send {
     to: Sender[Input],
-    text_bytes: u64
+    producer: Producer,
 }
 
 pub opaque type Hub {
     door: Door,
-    actor: Task[()]
+    actor: Task[()],
+    relay: Task[()]
 }
 
 pub opaque type Target: send {
-    door: Door,
+    producer: Producer,
     group: String,
     clock: Clock
 }
 
 pub resource type Source: send {
-    door: Door,
-    lease: Option[Sender[()]],
+    producer: Producer,
+    lease: Option[Client[()]],
     group: String,
     key: Key,
     seq: u64,
@@ -46,7 +54,7 @@ pub resource type Source: send {
     clock: Clock
 } drop(ended) {
     let _ = replace(mut ended.lease, None)
-    let _ = channel.try_send(ended.door.to, Sweep)
+    let _ = conn.try_send(ended.producer.to, Prune)
 }
 
 pub opaque type Observer {
@@ -71,7 +79,7 @@ type Entry: key {
 type Active {
     audience: Audience,
     key: Key,
-    live: Receiver[()],
+    live: Inbox[()],
     seq: u64,
     produced_ns: u64,
     base: u64,
@@ -92,6 +100,13 @@ fn open(live: Receiver[()]) -> bool {
     }
 }
 
+fn producer_open(live: Inbox[()]) -> bool {
+    match conn.try_receive(live) {
+        Error(Empty) => true,
+        _ => false,
+    }
+}
+
 fn audience_of(group: String, caller: store.Caller) -> Audience {
     Audience(group: string.from(group), issuer: caller.issuer, subject: clone(caller.subject))
 }
@@ -109,7 +124,9 @@ fn notify(watching: Map[u64, Watching], audience: Audience) -> bool {
     for (_, w) in watching {
         if same_audience(w.audience, audience) && open(w.live) {
             any = true
-            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
+            if let Some(signal) = view w.signal {
+                let _ = runner.client.wake(signal)
+            }
         }
     }
     any
@@ -125,12 +142,14 @@ fn prune(mut active: Map[Entry, Active], mut watching: Map[u64, Watching]) {
             list.push(mut gone, id)
         }
     }
-    for id in gone { let _ = map.remove(mut watching, id) }
+    for id in gone {
+        let _ = map.remove(mut watching, id)
+    }
     let mut closed: List[Entry] = list.new()
     let mut unwatched: List[Entry] = list.new()
     let mut changed: Map[Audience, bool] = map.new()
     for (entry, a) in active {
-        if !open(a.live) {
+        if !producer_open(a.live) {
             map.insert(mut changed, clone(a.audience), true)
             list.push(mut closed, clone(entry))
         } else if !map.contains(audiences, a.audience) && string.byte_len(a.text) > 0u64 {
@@ -139,14 +158,20 @@ fn prune(mut active: Map[Entry, Active], mut watching: Map[u64, Watching]) {
     }
     for (_, w) in watching {
         if map.contains(changed, w.audience) {
-            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
+            if let Some(signal) = view w.signal {
+                let _ = runner.client.wake(signal)
+            }
         }
     }
-    for entry in closed { let _ = map.remove(mut active, entry) }
+    for entry in closed {
+        let _ = map.remove(mut active, entry)
+    }
     for take entry in take unwatched {
         let mut a = option.unwrap(map.remove(mut active, entry))
         a.text = string.new()
-        if a.key.tool == None { a.changed = 0u64 }
+        if a.key.tool == None {
+            a.changed = 0u64
+        }
         map.insert(mut active, take entry, take a)
     }
 }
@@ -156,38 +181,57 @@ fn revoke_watchers(mut watching: Map[u64, Watching], audience: Audience) {
     for (id, w) in watching {
         if same_audience(w.audience, audience) {
             list.push(mut revoked, id)
-            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
+            if let Some(signal) = view w.signal {
+                let _ = runner.client.wake(signal)
+            }
         }
     }
-    for id in revoked { let _ = map.remove(mut watching, id) }
+    for id in revoked {
+        let _ = map.remove(mut watching, id)
+    }
 }
 
-fn starts(mut active: Map[Entry, Active], watching: Map[u64, Watching], group: String, caller: store.Caller, key: Key, produced: u64, changed: u64, take live: Receiver[()]) {
+fn starts(mut active: Map[Entry, Active], watching: Map[u64, Watching], group: String, caller: store.Caller, key: Key, produced: u64, changed: u64, take live: Inbox[()]) {
     let entry = entry_of(group, key)
     if let Some(a) = map.get(active, entry) {
         let old = a.key
-        if old.dispatch == key.dispatch && old.attempt >= key.attempt { return }
+        if old.dispatch == key.dispatch && old.attempt >= key.attempt {
+            return
+        }
         if old.dispatch.store_hi == key.dispatch.store_hi && old.dispatch.store_lo == key.dispatch.store_lo {
-            if old.dispatch.version > key.dispatch.version || (old.dispatch.version == key.dispatch.version && old.dispatch.index > key.dispatch.index) { return }
+            if old.dispatch.version > key.dispatch.version || (old.dispatch.version == key.dispatch.version && old.dispatch.index > key.dispatch.index) {
+                return
+            }
         }
     }
     let audience = audience_of(group, caller)
     let _ = notify(watching, audience)
     let state_seq = first_seq(key)
-    map.insert(mut active, take entry, Active(audience: take audience, key: key, live: take live,
-        seq: state_seq, produced_ns: produced, base: 0u64, text: string.new(), changed: if state_seq == 0u64 { 0u64 } else { changed }))
+    map.insert(mut active, take entry, Active(audience: take audience, key: key, live: take live, seq: state_seq, produced_ns: produced, base: 0u64, text: string.new(), changed: if state_seq == 0u64 {
+        0u64
+    } else {
+        changed
+    }))
 }
 
 fn on_delta(mut active: Map[Entry, Active], watching: Map[u64, Watching], limit: u64, changed: u64, group: String, key: Key, seq: u64, produced: u64, at: u64, text: String) {
     let entry = entry_of(group, key)
     {
-        let Some(a) = map.get(active, entry) else { return }
-        if a.key != key || !open(a.live) || a.seq >= seq || !notify(watching, a.audience) { return }
+        let Some(a) = map.get(active, entry) else {
+            return
+        }
+        if a.key != key || !producer_open(a.live) || a.seq >= seq || !notify(watching, a.audience) {
+            return
+        }
     }
     let mut a = option.unwrap(map.remove(mut active, entry))
     // A lost delta leaves a hole, so the next delta starts a new UTF-8 tail.
-    if seq != a.seq + 1u64 { a.text = string.new() }
-    if string.byte_len(a.text) == 0u64 { a.base = at }
+    if seq != a.seq + 1u64 {
+        a.text = string.new()
+    }
+    if string.byte_len(a.text) == 0u64 {
+        a.base = at
+    }
     a.seq = seq
     a.produced_ns = produced
     a.changed = changed
@@ -197,7 +241,9 @@ fn on_delta(mut active: Map[Entry, Active], watching: Map[u64, Watching], limit:
         let cut = {
             let raw = string.as_bytes(a.text)
             let mut from = n - limit
-            while from < n && (raw[from] & 192u8) == 128u8 { from += 1u64 }
+            while from < n && (raw[from] & 192u8) == 128u8 {
+                from += 1u64
+            }
             from
         }
         a.text = string.from(string.slice(a.text, cut, n))
@@ -207,20 +253,26 @@ fn on_delta(mut active: Map[Entry, Active], watching: Map[u64, Watching], limit:
 }
 
 fn draft_for(active: Map[Entry, Active], watching: Map[u64, Watching], id: u64, limit: u64) -> Option[Draft] {
-    let Some(w) = map.get(watching, id) else { return None }
+    let Some(w) = map.get(watching, id) else {
+        return None
+    }
     let mut newest = 0u64
     let mut at: Option[Entry] = None
     for (entry, a) in active {
-        if same_audience(a.audience, w.audience) && a.changed > newest && open(a.live) {
+        if same_audience(a.audience, w.audience) && a.changed > newest && producer_open(a.live) {
             newest = a.changed
             at = Some(clone(entry))
         }
     }
-    let Some(take entry) = take at else { return None }
+    let Some(take entry) = take at else {
+        return None
+    }
     let a = option.unwrap(map.get(active, entry))
     // The running status is derived from the tool's lease. It needs no text buffer.
     let (offset, take text) = if a.key.tool != None && string.byte_len(a.text) == 0u64 {
-        if limit < string.byte_len("running tool") { return None }
+        if limit < string.byte_len("running tool") {
+            return None
+        }
         (0u64, string.from("running tool"))
     } else {
         (a.base, string.from(a.text))
@@ -264,8 +316,37 @@ fn receive_all(take job: (Receiver[Input], u64)) -> () waits {
                 prune(mut active, mut watching)
                 let _ = channel.send(reply, draft_for(active, watching, id, limit))
             },
+            Barrier(reply) => {
+                let _ = conn.send(reply, ())
+            },
             Sweep => prune(mut active, mut watching),
             Stop => return,
+        }
+    }
+}
+
+fn forward_production(take job: (Inbox[Production], Sender[Input])) -> () waits {
+    let (take incoming, take to) = take job
+    while let Ok(take request) = conn.receive(incoming) {
+        match take request {
+            Begin(take group, take caller, key, produced, take reply) => {
+                let Ok((take lease, take live)) = (conn.new(1u64, bytes 0u64) : Result[(Client[()], Inbox[()]), Capacity]) else {
+                    continue
+                }
+                if let Error(_) = channel.send(to, Start(take group, take caller, key, produced, take live)) {
+                    return
+                }
+                let _ = conn.send(reply, take lease)
+            },
+            Update(take group, key, seq, produced, at, take text) => {
+                let _ = channel.send(to, Delta(take group, key, seq, produced, at, take text))
+            },
+            Flush(take reply) => {
+                let _ = channel.send(to, Barrier(take reply))
+            },
+            Prune => {
+                let _ = channel.send(to, Sweep)
+            },
         }
     }
 }
@@ -277,8 +358,10 @@ pub fn start(tasks: Tasks, bytes_budget: u64, text_bytes: u64) -> Hub {
     } else {
         16384u64
     }
-    let port = Door(to: take to, text_bytes: limit)
-    Hub(door: take port, actor: task.spawn(tasks, bytes bytes_budget, (take inbox, limit), receive_all))
+    let (produce, requests): (Client[Production], Inbox[Production]) = result.unwrap(conn.new(64u64, bytes 64u64 * (limit + 4096u64)))
+    let relay = task.spawn(tasks, bytes 65536u64, (take requests, channel.sender(to)), forward_production)
+    let port = Door(to: take to, producer: Producer(to: take produce, text_bytes: limit))
+    Hub(door: take port, actor: task.spawn(tasks, bytes bytes_budget, (take inbox, limit), receive_all), relay: take relay)
 }
 
 pub fn door(h: Hub) -> Door {
@@ -286,19 +369,32 @@ pub fn door(h: Hub) -> Door {
 }
 
 pub fn copy_door(d: Door) -> Door {
-    Door(to: channel.sender(d.to), text_bytes: d.text_bytes)
+    Door(to: channel.sender(d.to), producer: copy_producer(d.producer))
 }
 
 pub fn stop(take h: Hub) -> () waits {
-    let Hub(door: take d, actor: take actor) = take h
+    let Hub(door: take d, actor: take actor, relay: take relay) = take h
+    let _ = take relay
     let _ = channel.send(d.to, Stop)
     let _ = task.join(take actor)
 }
 
 // Register only after the durable worker has its attempt permit. Dropping the
 // source before settle closes its lease even if the worker exits early.
+pub fn copy_producer(p: Producer) -> Producer {
+    Producer(to: conn.client(p.to), text_bytes: p.text_bytes)
+}
+
+pub fn producer(d: Door) -> Producer {
+    copy_producer(d.producer)
+}
+
 pub fn target(d: Door, group: String, clock: Clock) -> Target {
-    Target(door: copy_door(d), group: string.from(group), clock: clock)
+    producer_target(d.producer, group, clock)
+}
+
+pub fn producer_target(p: Producer, group: String, clock: Clock) -> Target {
+    Target(producer: copy_producer(p), group: string.from(group), clock: clock)
 }
 
 fn first_seq(key: Key) -> u64 {
@@ -309,13 +405,18 @@ fn first_seq(key: Key) -> u64 {
     }
 }
 
-pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] {
-    let d = view t.door
-    let (lease, live): (Sender[()], Receiver[()]) = channel.new(1u64)
-    if let Error(_) = channel.try_send(d.to, Start(string.from(t.group), clone(caller), key, host.mono_ns(t.clock), take live)) {
+pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] waits {
+    let p = view t.producer
+    let Ok((take reply, take answer)) = (conn.new(1u64, bytes 0u64) : Result[(Client[Client[()]], Inbox[Client[()]]), Capacity]) else {
         return None
     }
-    match Source(door: copy_door(d), lease: Some(take lease), group: string.from(t.group), key: key, seq: first_seq(key), offset: 0u64, clock: t.clock) {
+    if let Error(_) = conn.try_send(p.to, Begin(string.from(t.group), clone(caller), key, host.mono_ns(t.clock), take reply)) {
+        return None
+    }
+    let Ok(take lease) = conn.receive(answer) else {
+        return None
+    }
+    match Source(producer: copy_producer(p), lease: Some(take lease), group: string.from(t.group), key: key, seq: first_seq(key), offset: 0u64, clock: t.clock) {
         Ok(take made) => Some(take made),
         Error(_) => None,
     }
@@ -325,27 +426,27 @@ pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] {
 // sequence replaces the draft so unrelated spans never concatenate.
 pub fn delta(mut p: Source, text: String) {
     let n = string.byte_len(text)
-    if p.key.tool != None || n == 0u64 || p.door.text_bytes == 0u64 {
+    if p.key.tool != None || n == 0u64 || p.producer.text_bytes == 0u64 {
         return
     }
     let raw = string.as_bytes(text)
-    let mut from = if n > p.door.text_bytes {
-        n - p.door.text_bytes
+    let mut from = if n > p.producer.text_bytes {
+        n - p.producer.text_bytes
     } else {
         0u64
     }
     while from < n && (raw[from] & 192u8) == 128u8 {
         from += 1u64
     }
-    if n > p.door.text_bytes {
+    if n > p.producer.text_bytes {
         p.seq += 1u64
     }
     p.seq += 1u64
     let at = p.offset + from
     p.offset += n
-    let _ = bound bytes p.door.text_bytes + 4096u64 {
+    let _ = bound bytes p.producer.text_bytes + 4096u64 {
         let shown = string.from(string.slice(text, from, n))
-        let _ = channel.try_send(p.door.to, Delta(string.from(p.group), p.key, p.seq, host.mono_ns(p.clock), at, take shown))
+        let _ = conn.try_send(p.producer.to, Update(string.from(p.group), p.key, p.seq, host.mono_ns(p.clock), at, take shown))
     }
 }
 
@@ -382,6 +483,13 @@ pub fn revoke(d: Door, group: String, caller: store.Caller) -> () waits {
 }
 
 pub fn read(obs: Observer) -> Option[Draft] waits {
+    let Ok((take synced, take sync_in)) = (conn.new(1u64, bytes 0u64) : Result[(Client[()], Inbox[()]), Capacity]) else {
+        return None
+    }
+    if let Error(_) = conn.send(obs.door.producer.to, Flush(take synced)) {
+        return None
+    }
+    let _ = conn.receive(sync_in)
     let (reply, from): (Sender[Option[Draft]], Receiver[Option[Draft]]) = channel.new(1u64)
     if let Error(_) = channel.send(obs.door.to, Read(obs.id, take reply)) {
         return None

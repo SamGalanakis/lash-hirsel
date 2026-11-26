@@ -423,7 +423,7 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Handles, store.Error] {
 }
 
 // ---- the composition ----
-pub type Fault: codec + send = BadArgs(String) | Refused(String) | Unavailable | TooLarge
+pub type Fault: codec + cross = BadArgs(String) | Refused(String) | Unavailable | TooLarge
 
 // What the model is sent. `system` and `tools` are the fold of the System
 // entries up to the cutoff, so a resend is built from the log and never from
@@ -552,8 +552,7 @@ pub type Agent[G: send, App: inert + send]: send {
 }
 
 pub fn agent[G: send, App: inert + send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits], take app: App) -> Agent[G, App] {
-    Agent(name: take name, route: take route, app: take app, model: model, charge: RequireGuarantee, keep_warm: None, hedged_model: None, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
-    inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64, no_progress: Bounded(3u64)))
+    Agent(name: take name, route: take route, app: take app, model: model, charge: RequireGuarantee, keep_warm: None, hedged_model: None, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64, inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64, no_progress: Bounded(3u64)))
 }
 
 pub fn outside[G: send, App: inert + send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G, App] {

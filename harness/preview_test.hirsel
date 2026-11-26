@@ -11,7 +11,9 @@ fn trace_requests(take trace: ReadTrace) -> () waits {
         if let Read(_, _) = view message {
             let _ = channel.try_send(trace.reads, ())
         }
-        if let Error(_) = channel.send(trace.hub, take message) { return }
+        if let Error(_) = channel.send(trace.hub, take message) {
+            return
+        }
     }
 }
 
@@ -20,5 +22,5 @@ pub fn trace_reads(tasks: Tasks, hub: Door) -> (Door, Receiver[()], Task[()]) {
     let (reads, received): (Sender[()], Receiver[()]) = channel.new(1u64)
     let job = ReadTrace(inbox: take inbox, hub: channel.sender(hub.to), reads: take reads)
     let actor = task.spawn(tasks, bytes 65536u64, take job, trace_requests)
-    (Door(to: take to, text_bytes: hub.text_bytes), take received, take actor)
+    (Door(to: take to, producer: copy_producer(hub.producer)), take received, take actor)
 }

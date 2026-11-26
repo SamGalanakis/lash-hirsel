@@ -185,24 +185,24 @@ fn notes_section(tx: store.Tx, h: harness.Handles, t: Tables) -> Result[Option[S
 }
 
 // ---- grants: what Outside tools and the model are given ----
-pub type Live: send {
+pub type Live: cross {
     net: Net,
     address: Addr,
     key: Secret,
     out: Stdout,
-    preview: harness.preview.Door,
+    preview: harness.preview.Producer,
     group: String,
     model: String,
 }
 
 // A scripted session's draft: the preview hub and the session's group.
-pub type Stream: send {
-    door: harness.preview.Door,
+pub type Stream: cross {
+    door: harness.preview.Producer,
     group: String
 }
 
-pub type Services: send {
-    helper: Sender[HelperAsk],
+pub type Services: cross {
+    helper: Client[HelperAsk],
     clock: Clock,
     live: Option[Live],
     stream: Option[Stream]
@@ -212,7 +212,7 @@ pub type Services: send {
 pub type Grants: send {
     handles: Handles,
     context: Option[runner.TriggerContext],
-    helper: Sender[HelperAsk],
+    helper: Client[HelperAsk],
     clock: Clock,
     live: Option[Live],
     stream: Option[Stream]
@@ -222,11 +222,23 @@ pub fn copy_stream(s: Option[Stream], group: String) -> Option[Stream] {
     let Some(d) = view s else {
         return None
     }
-    Some(Stream(door: harness.preview.copy_door(d.door), group: string.from(group)))
+    Some(Stream(door: harness.preview.copy_producer(d.door), group: string.from(group)))
 }
 
 pub fn copy_live(l: Live, group: String) -> Live {
-    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group), model: string.from(l.model))
+    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_producer(l.preview), group: string.from(group), model: string.from(l.model))
+}
+
+pub fn copy_services(s: Services) -> Services {
+    let live = match s.live {
+        Some(l) => Some(copy_live(l, l.group)),
+        None => None,
+    }
+    let stream = match s.stream {
+        Some(d) => copy_stream(s.stream, d.group),
+        None => None,
+    }
+    Services(helper: conn.client(s.helper), clock: s.clock, live: take live, stream: take stream)
 }
 
 fn make_grants(s: Services, h: Handles, ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
@@ -239,12 +251,12 @@ fn make_grants(s: Services, h: Handles, ctx: runner.TriggerContext) -> Result[Gr
         None => string.new(),
     }
     let stream = copy_stream(s.stream, group)
-    Ok(Grants(handles: clone(h), context: Some(runner.share_trigger_context(ctx)), helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
+    Ok(Grants(handles: clone(h), context: Some(runner.share_trigger_context(ctx)), helper: conn.client(s.helper), clock: s.clock, live: take live, stream: take stream))
 }
 
 // A bind's G: no trigger context, live model or stream.
 fn bind_grants(s: Services, h: Handles, _bind: ()) -> Result[Grants, Capacity] {
-    Ok(Grants(handles: clone(h), context: None, helper: channel.sender(s.helper), clock: s.clock, live: None, stream: None))
+    Ok(Grants(handles: clone(h), context: None, helper: conn.client(s.helper), clock: s.clock, live: None, stream: None))
 }
 
 // The ingress binding over this place's G (RUNNER-SPEC v2.70); it reads nothing from G.
@@ -260,14 +272,14 @@ fn clock_tool(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] {
 // The subagent: asks the helper place and returns its final answer.
 fn summarize(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
     let line = text_arg(args, "text")?
-    let (reply, replied): (Sender[Result[String, String]], Receiver[Result[String, String]]) = channel.new(1u64)
-    if let Error(_) = channel.send(g.helper, Summarize(take line, take reply)) {
+    let (reply, replied): (Client[Option[Shared[Bytes]]], Inbox[Option[Shared[Bytes]]]) = conn.new(1u64, bytes 0u64) ?=> |_| Unavailable
+    if let Error(_) = conn.send(g.helper, Summarize(shared.new(take line), take reply)) {
         return Error(Unavailable)
     }
     // The helper's place may have run its model before it failed, so a
     // failure after the ask is in doubt, not a refusal.
-    match channel.receive(replied) {
-        Ok(Ok(take s)) => Ok(string.into_bytes(take s)),
+    match conn.receive(replied) {
+        Ok(Some(take answer)) => Ok(clone(answer)),
         _ => Error(Unavailable),
     }
 }
@@ -480,10 +492,10 @@ fn advance(mut tx: store.Tx, h: Handles, caller: store.Caller, take wake: runner
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
     let mut target: Option[harness.preview.Target] = None
     if let Some(d) = view g.stream {
-        target = Some(harness.preview.target(d.door, d.group, g.clock))
+        target = Some(harness.preview.producer_target(d.door, d.group, g.clock))
     }
     if let Some(l) = view g.live {
-        target = Some(harness.preview.target(l.preview, l.group, g.clock))
+        target = Some(harness.preview.producer_target(l.preview, l.group, g.clock))
     }
     let Some(ctx) = view g.context else {
         fail("only an attempt's G reaches an effect; a bind's G has no trigger context")
@@ -592,10 +604,10 @@ fn helper_place(mut r: runner.Registry[HelperGrants, harness.Handles]) -> Result
 
 // The helper's service: it owns the helper place's directory and, per ask,
 // submits the text, runs the place until it is idle and reads the answer.
-pub type HelperAsk: send = Summarize(String, Sender[Result[String, String]])
+pub type HelperAsk: cross = Summarize(Shared[String], Client[Option[Shared[Bytes]]])
 
 pub type HelperSeed: send {
-    inbox: Receiver[HelperAsk],
+    inbox: Inbox[HelperAsk],
     dir: Dir,
     clock: Clock,
     random: Random,
@@ -657,9 +669,13 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
 
 pub fn helper_service(take seed: HelperSeed) -> () waits {
     let mut n = 0u64
-    while let Ok(take ask) = channel.receive(seed.inbox) {
+    while let Ok(take ask) = conn.receive(seed.inbox) {
         let Summarize(take line, reply) = take ask
-        let _ = channel.send(reply, helper_ask(seed, n, take line))
+        let answer = match helper_ask(seed, n, string.from(line)) {
+            Ok(take text) => Some(shared.new(string.into_bytes(take text))),
+            Error(_) => None,
+        }
+        let _ = conn.send(reply, take answer)
         n += 1u64
     }
 }
@@ -721,7 +737,7 @@ fn place_settings(take backing: runner.Backing, clock: Clock, random: Random, ta
     }
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()))
     let (binding, bind_mint) = if ingress {
-        (Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), Some(runner.Mint(seed: Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: None), mint: bind_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)))
+        (Some(runner.wire(code.describe(bound_caller), 4096u64, 65536u64)), Some(runner.Mint(seed: Services(helper: conn.client(s.helper), clock: s.clock, live: None, stream: None), mint: bind_grants, mint_bytes: 65536u64, mint_steps: runner.DEFAULT_STEPS)))
     } else {
         (None, None)
     }
@@ -951,20 +967,20 @@ pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, 
         return quit(out, why)
     }
     emit(out, "you: ", prompt)
-    let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
+    let (ask, asks): (Client[HelperAsk], Inbox[HelperAsk]) = result.unwrap(conn.new(1u64, bytes 0u64))
     let config = helper_settings(helper, clock, random, tasks, net)
     let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options())))
     // Runner's 1 MiB keep and 8 MiB for the helper's submit and read work.
     let allowance = result.unwrap(runner.operate_bytes(config)) + 9 * 1048576u64 + writer
     let helping = task.spawn(tasks, bytes allowance, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
-    let first = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let first = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: conn.client(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = first {
         return quit(out, why)
     }
     if let Error(take why) = approve(out, parent, clock, random, tasks) {
         return quit(out, why)
     }
-    let second = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let second = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: conn.client(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = second {
         return quit(out, why)
     }

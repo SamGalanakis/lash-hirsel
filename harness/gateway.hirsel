@@ -19,13 +19,14 @@ pub type Refused: send = Unknown | Full | Asleep | Denied | Place(platform.local
 
 // `place_bytes` is the budget every live session's place shares, and `idle_ms` the idle
 // time each place stops after (the host's Config, §14.2, §14.4).
-pub type GatewayConfig[T: send]: send {
+pub type GatewayConfig[T: cross]: send {
     root: Dir,
     options: store.Options,
     factory: platform.local.Factory[T],
     max_sessions: u64,
     idle_ms: u64,
     place_bytes: u64,
+    units: u64,
     tasks: Tasks,
     clock: Clock,
     random: Random,
@@ -111,9 +112,9 @@ pub fn copy_door(d: Door) -> Door {
     Door(host: platform.local.copy_door(d.host), schema: d.schema)
 }
 
-pub fn gateway[T: send](take way: Doorway, take config: GatewayConfig[T]) -> Result[Gateway, Refused] waits {
-    let GatewayConfig(root: root, options: take options, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
-    let lconfig = platform.local.Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
+pub fn gateway[T: cross](take way: Doorway, take config: GatewayConfig[T]) -> Result[Gateway, Refused] waits {
+    let GatewayConfig(root: root, options: take options, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes, units: units, tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
+    let lconfig = platform.local.Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes, units: units, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
     let Doorway(way: take w, schema: schema) = take way
     match platform.local.local(take w, take lconfig) {
         Ok(take host) => Ok(Gateway(host: take host, schema: schema)),

@@ -9,7 +9,7 @@ fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Re
         Some(l) => Some(notes.main.copy_live(l, supplied.name)),
         None => None,
     }
-    let seed = notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: notes.main.copy_stream(s.stream, supplied.name))
+    let seed = notes.main.Services(helper: conn.client(s.helper), clock: s.clock, live: take live, stream: notes.main.copy_stream(s.stream, supplied.name))
     let config = notes.main.wired_settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, take seed)
     Ok(take config)
 }
@@ -29,13 +29,13 @@ fn listen(h: Host, hub: harness.preview.Hub, model: String, take live: Option[no
     let Ok(helper_dir) = host.mkdtemp(h.data, mut helper_name) else {
         return notes.main.quit(h.out, "Use a writable data directory for the gateway.")
     }
-    let (ask, asks): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
+    let (ask, asks): (Client[notes.main.HelperAsk], Inbox[notes.main.HelperAsk]) = result.unwrap(conn.new(1u64, bytes 0u64))
     let helping = task.spawn(h.tasks, bytes HELPER_BYTES, notes.main.HelperSeed(inbox: take asks, dir: helper_dir, clock: h.clock, random: h.random, tasks: h.tasks, net: h.net), notes.main.helper_service)
     let way = harness.gateway.doorway(notes.main.seed_schema)
     let d = harness.gateway.door_of(way)
-    let stream = Some(notes.main.Stream(door: harness.preview.door(hub), group: ""))
-    let seed = notes.main.Services(helper: channel.sender(ask), clock: h.clock, live: take live, stream: take stream)
-    let config = harness.gateway.GatewayConfig(root: h.data, options: notes.main.options(), factory: platform.local.seeded_factory(session), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: PLACE_POOL, tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, watch: None, seed: take seed)
+    let stream = Some(notes.main.Stream(door: harness.preview.producer(harness.preview.door(hub)), group: ""))
+    let seed = notes.main.Services(helper: conn.client(ask), clock: h.clock, live: take live, stream: take stream)
+    let config = harness.gateway.GatewayConfig(root: h.data, options: notes.main.options(), factory: platform.local.seeded_factory(session, notes.main.copy_services), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: PLACE_POOL, units: 1u64, tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, watch: None, seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take started) => take started,
         Error(Full) => return notes.main.quit(h.out, "Gateway capacity exhausted. Rebuild with --limit 536870912."),
@@ -58,7 +58,7 @@ fn listen(h: Host, hub: harness.preview.Hub, model: String, take live: Option[no
 fn boot(h: Host, model: String, upstream: Option[(Addr, Secret)]) -> Result[(), Exit] waits {
     let hub = harness.preview.start(h.tasks, 1048576u64, 4096u64)
     let live = match upstream {
-        Some((address, key)) => Some(notes.main.Live(net: h.net, address: address, key: secret.share(key), out: h.out, preview: harness.preview.door(hub), group: "", model: string.from(model))),
+        Some((address, key)) => Some(notes.main.Live(net: h.net, address: address, key: secret.share(key), out: h.out, preview: harness.preview.producer(harness.preview.door(hub)), group: "", model: string.from(model))),
         None => None,
     }
     let ran = listen(h, hub, model, take live)
